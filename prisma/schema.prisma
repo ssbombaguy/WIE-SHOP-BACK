@@ -1,0 +1,179 @@
+// Prisma schema for the Cyber dropshipping store.
+// After changing this file run:  npm run db:migrate  (creates a migration + regenerates the client)
+//
+// Money is stored as integer cents (priceCents = 99900 means $999.00).
+// Floats lose precision with money; integers never do. Stripe uses the same convention.
+
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  moduleFormat = "esm"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  CUSTOMER
+  ADMIN
+}
+
+// Lifecycle of a dropshipping order:
+// PENDING -> PROCESSING (forwarded to supplier) -> SHIPPED (tracking number known) -> DELIVERED
+enum OrderStatus {
+  PENDING
+  PROCESSING
+  SHIPPED
+  DELIVERED
+  CANCELLED
+}
+
+enum PaymentStatus {
+  UNPAID
+  PAID
+  REFUNDED
+}
+
+enum ShippingMethod {
+  STANDARD
+  EXPRESS
+  SCHEDULED
+}
+
+model User {
+  id           String     @id @default(cuid())
+  email        String     @unique
+  name         String
+  passwordHash String
+  role         Role       @default(CUSTOMER)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  orders       Order[]
+  favorites    Favorite[]
+}
+
+model Category {
+  id        String    @id @default(cuid())
+  name      String
+  slug      String    @unique
+  icon      String // icon key the frontend maps to an SVG, e.g. "phone"
+  sortOrder Int       @default(0)
+  products  Product[]
+}
+
+// The companies that actually hold stock and ship to the customer.
+model Supplier {
+  id           String    @id @default(cuid())
+  name         String    @unique
+  country      String
+  contactEmail String
+  website      String?
+  shippingDays Int // average days from order to delivery
+  products     Product[]
+}
+
+model Product {
+  id             String         @id @default(cuid())
+  name           String
+  slug           String         @unique
+  brand          String
+  description    String
+  priceCents     Int // what the customer pays
+  compareAtCents Int? // old price, shown crossed out when on sale
+  costCents      Int // what we pay the supplier; never sent to the storefront
+  stock          Int            @default(0)
+  supplierSku    String
+  rating         Float          @default(0)
+  reviewCount    Int            @default(0)
+  colors         String[]
+  specs          Json // free-form per category: { "Screen size": "6.1\"", "Battery": "3279 mAh" }
+  isFeatured     Boolean        @default(false)
+  isBestseller   Boolean        @default(false)
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+  categoryId     String
+  category       Category       @relation(fields: [categoryId], references: [id])
+  supplierId     String
+  supplier       Supplier       @relation(fields: [supplierId], references: [id])
+  images         ProductImage[]
+  favorites      Favorite[]
+  orderItems     OrderItem[]
+
+  @@index([categoryId])
+  @@index([brand])
+  @@index([priceCents])
+}
+
+model ProductImage {
+  id        String  @id @default(cuid())
+  url       String
+  publicId  String? // Cloudinary public_id, set once the image is uploaded there
+  sourceUrl String? // where the photo came from (license / attribution page)
+  alt       String
+  position  Int     @default(0)
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([productId])
+}
+
+// Join table: which user saved which product. The pair is the primary key, so no duplicates.
+model Favorite {
+  userId    String
+  productId String
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@id([userId, productId])
+}
+
+model Order {
+  id             String         @id @default(cuid())
+  orderNumber    String         @unique // human friendly, e.g. CY-7F3K9Q
+  userId         String? // null for guest checkout
+  user           User?          @relation(fields: [userId], references: [id])
+  email          String
+  status         OrderStatus    @default(PENDING)
+  paymentStatus  PaymentStatus  @default(UNPAID)
+  shippingMethod ShippingMethod
+  scheduledFor   DateTime? // only for SCHEDULED shipping
+  subtotalCents  Int
+  shippingCents  Int
+  taxCents       Int
+  totalCents     Int
+  // Shipping address is copied onto the order so later profile edits don't rewrite history.
+  fullName       String
+  phone          String
+  addressLine    String
+  city           String
+  postalCode     String
+  country        String
+  cardBrand      String? // demo payment: only brand + last 4 digits are ever stored
+  cardLast4      String?
+  trackingNumber String?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+  items          OrderItem[]
+
+  @@index([userId])
+  @@index([status])
+}
+
+model OrderItem {
+  id            String  @id @default(cuid())
+  orderId       String
+  order         Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId     String
+  product       Product @relation(fields: [productId], references: [id])
+  // Snapshot of the product at purchase time, so changing a price later doesn't alter old orders.
+  productName   String
+  imageUrl      String?
+  color         String?
+  unitCents     Int
+  unitCostCents Int
+  quantity      Int
+
+  @@index([orderId])
+}
