@@ -28,7 +28,9 @@ async function uploadWithRetry(url, publicId, attempts = 4) {
     try {
       return await cloudinary.uploader.upload(url, { folder: FOLDER, public_id: publicId, overwrite: true });
     } catch (err) {
-      if (i >= attempts) throw err;
+      // 4xx (bad credentials, bad file) won't fix itself; only retry network/5xx/429 errors.
+      const code = err.http_code ?? err.error?.http_code;
+      if (i >= attempts || (code >= 400 && code < 500 && code !== 429)) throw err;
       await sleep(2000 * 2 ** i);
     }
   }
