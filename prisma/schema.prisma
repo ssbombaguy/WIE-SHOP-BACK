@@ -148,8 +148,8 @@ model Order {
   phone          String
   addressLine    String
   city           String
-  postalCode     String
-  country        String
+  postalCode     String? // not collected at checkout anymore; kept for older orders
+  country        String         @default("Georgia")
   cardBrand      String? // demo payment: only brand + last 4 digits are ever stored
   cardLast4      String?
   trackingNumber String?

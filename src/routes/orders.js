@@ -84,8 +84,9 @@ const orderBody = z
       phone: z.string().trim().regex(/^[+\d][\d\s()-]{6,20}$/, "Enter a valid phone number"),
       addressLine: z.string().trim().min(4, "Enter your street address").max(200),
       city: z.string().trim().min(2, "Enter your city").max(80),
-      postalCode: z.string().trim().min(3, "Enter your postal code").max(12),
-      country: z.string().trim().min(2, "Enter your country").max(60),
+      // Checkout no longer asks for these; the store ships within Georgia.
+      postalCode: z.string().trim().max(12).optional(),
+      country: z.string().trim().min(2).max(60).default("Georgia"),
     }),
     // Demo payment. The full card number never leaves the browser; we only receive brand + last 4.
     payment: z.object({
