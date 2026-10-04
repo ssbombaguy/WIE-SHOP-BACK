@@ -4,7 +4,7 @@
 import "dotenv/config";
 import bcrypt from "bcryptjs";
 import { createPrisma } from "../src/db.js";
-import { categories, products, suppliers } from "./seed-data.js";
+import { bundles, categories, products, suppliers } from "./seed-data.js";
 
 const prisma = createPrisma();
 
@@ -48,6 +48,7 @@ async function main() {
       slug,
       brand: p.brand,
       description: p.description,
+      descriptionKa: p.descriptionKa ?? null,
       priceCents: cents(p.price),
       compareAtCents: cents(p.compareAt),
       costCents: cents(p.cost),
@@ -59,6 +60,8 @@ async function main() {
       specs: p.specs,
       isFeatured: Boolean(p.featured),
       isBestseller: Boolean(p.bestseller),
+      condition: p.condition ?? "NEW",
+      archived: false,
       // Spread creation dates so "Newest" sorting has something to sort.
       createdAt: new Date(Date.now() - i * 36 * 60 * 60 * 1000),
       category: { connect: { id: categoryIds[p.category] } },
@@ -84,11 +87,33 @@ async function main() {
     });
   }
 
-  // Products removed from seed-data.js are deleted too, unless an order references them.
-  const { count: removed } = await prisma.product.deleteMany({
-    where: { slug: { notIn: products.map((p) => slugify(p.name)) }, orderItems: { none: {} } },
+  // Bundles: each listed main product gets exactly the accessories in seed-data.js.
+  const idBySlug = new Map((await prisma.product.findMany({ select: { id: true, slug: true } })).map((p) => [p.slug, p.id]));
+  for (const b of bundles) {
+    const productId = idBySlug.get(slugify(b.product));
+    await prisma.bundleItem.deleteMany({ where: { productId } });
+    await prisma.bundleItem.createMany({
+      data: b.items.map(([name, discountPercent], position) => ({ productId, itemId: idBySlug.get(slugify(name)), discountPercent, position })),
+    });
+  }
+
+  // Products removed from seed-data.js are deleted too. Ones that old orders still reference
+  // can't be deleted, so they're archived instead (hidden from the shop, kept for order history).
+  const removedWhere = { slug: { notIn: products.map((p) => slugify(p.name)) } };
+  const { count: removed } = await prisma.product.deleteMany({ where: { ...removedWhere, orderItems: { none: {} } } });
+  const { count: archived } = await prisma.product.updateMany({
+    where: { ...removedWhere, archived: false },
+    data: { archived: true, stock: 0, isFeatured: false, isBestseller: false },
   });
+  await prisma.favorite.deleteMany({ where: { product: { archived: true } } });
   if (removed) console.log(`Removed ${removed} products no longer in seed-data.js`);
+  if (archived) console.log(`Archived ${archived} products that old orders still reference`);
+
+  // Same for categories, as long as no (archived) product still points at them.
+  const { count: removedCategories } = await prisma.category.deleteMany({
+    where: { slug: { notIn: categories.map((c) => c.slug) }, products: { none: {} } },
+  });
+  if (removedCategories) console.log(`Removed ${removedCategories} categories no longer in seed-data.js`);
 
   const logins = await seedUsers();
   const counts = await Promise.all([prisma.category.count(), prisma.supplier.count(), prisma.product.count(), prisma.productImage.count()]);

@@ -3,7 +3,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../db.js";
 import { HttpError, badRequest, conflict, notFound, unauthorized } from "../lib/http-error.js";
-import { SHIPPING_OPTIONS, calculateTotals } from "../lib/pricing.js";
+import { SHIPPING_OPTIONS, calculateTotals, priceLines } from "../lib/pricing.js";
 import * as serialize from "../lib/serializers.js";
 import { productCard, productCardInclude } from "../lib/serializers.js";
 import { optionalAuth, requireAuth } from "../middleware/auth.js";
@@ -35,6 +35,9 @@ function mergeItems(items) {
   return [...map.values()];
 }
 
+// Bundle links between products that are both in the cart ("cheaper together" discounts).
+const bundleLinks = (db, ids) => db.bundleItem.findMany({ where: { productId: { in: ids }, itemId: { in: ids } } });
+
 // POST /api/orders/quote
 // The cart lives in the browser; this re-prices it with current DB prices and stock,
 // so the cart page never shows a stale price and checkout totals match the server.
@@ -44,30 +47,39 @@ router.post(
   async (req, res) => {
     const items = mergeItems(req.valid.body.items);
     const products = await prisma.product.findMany({
-      where: { id: { in: items.map((i) => i.productId) } },
+      where: { id: { in: items.map((i) => i.productId) }, archived: false },
       include: productCardInclude,
     });
     const byId = new Map(products.map((p) => [p.id, p]));
 
+    // Price only what can actually be bought (quantities capped to stock), bundle discounts included.
+    const available = items
+      .filter((i) => byId.has(i.productId))
+      .map((i) => ({ ...i, quantity: Math.min(i.quantity, byId.get(i.productId).stock) }));
+    const priced = priceLines(available, byId, await bundleLinks(prisma, [...byId.keys()]));
+
     const lines = items.map((item) => {
       const p = byId.get(item.productId);
       if (!p) return { ...item, product: null, problem: "This product is no longer available" };
-      const quantity = Math.min(item.quantity, p.stock);
+      const line = priced.find((l) => l.productId === item.productId && l.color === item.color);
       return {
         ...item,
-        quantity,
+        quantity: line.quantity,
         product: productCard(p),
         stock: p.stock,
-        unitCents: p.priceCents,
-        lineCents: p.priceCents * quantity,
+        unitCents: line.unitCents,
+        discountCents: line.discountCents,
+        discountPercent: line.discountPercent,
+        lineCents: line.lineCents,
         problem:
-          p.stock === 0 ? "Out of stock" : quantity < item.quantity ? `Only ${p.stock} left in stock` : null,
+          p.stock === 0 ? "Out of stock" : line.quantity < item.quantity ? `Only ${p.stock} left in stock` : null,
       };
     });
     const subtotal = lines.reduce((sum, l) => sum + (l.lineCents ?? 0), 0);
+    const discountCents = lines.reduce((sum, l) => sum + (l.discountCents ?? 0), 0);
     res.json({
       lines,
-      totals: calculateTotals(subtotal, req.valid.body.shippingMethod),
+      totals: { ...calculateTotals(subtotal, req.valid.body.shippingMethod), discountCents },
       shippingOptions: Object.entries(SHIPPING_OPTIONS).map(([method, o]) => ({ method, ...o })),
     });
   },
@@ -88,11 +100,14 @@ const orderBody = z
       postalCode: z.string().trim().max(12).optional(),
       country: z.string().trim().min(2).max(60).default("Georgia"),
     }),
-    // Demo payment. The full card number never leaves the browser; we only receive brand + last 4.
-    payment: z.object({
-      cardBrand: z.string().max(20),
-      cardLast4: z.string().regex(/^\d{4}$/, "Invalid card"),
-    }),
+    // Demo card payment, switched off in the storefront for now: orders arrive unpaid and the shop
+    // arranges payment. When sent, the full card number never leaves the browser, only brand + last 4.
+    payment: z
+      .object({
+        cardBrand: z.string().max(20),
+        cardLast4: z.string().regex(/^\d{4}$/, "Invalid card"),
+      })
+      .optional(),
   })
   .refine((o) => o.shippingMethod !== "SCHEDULED" || (o.scheduledFor && o.scheduledFor > new Date()), {
     path: ["scheduledFor"],
@@ -106,7 +121,7 @@ router.post("/", optionalAuth, validate({ body: orderBody }), async (req, res) =
   const body = req.valid.body;
 
   // Mirrors Stripe's test card 4000 0000 0000 0002 so the "card declined" UI can be demoed.
-  if (body.payment.cardLast4 === "0002") {
+  if (body.payment?.cardLast4 === "0002") {
     throw new HttpError(402, "Your card was declined. Try a different card.", { payment: "declined" });
   }
 
@@ -114,7 +129,7 @@ router.post("/", optionalAuth, validate({ body: orderBody }), async (req, res) =
 
   const order = await prisma.$transaction(async (tx) => {
     const products = await tx.product.findMany({
-      where: { id: { in: items.map((i) => i.productId) } },
+      where: { id: { in: items.map((i) => i.productId) }, archived: false },
       include: { images: { orderBy: { position: "asc" }, take: 1 } },
     });
     const byId = new Map(products.map((p) => [p.id, p]));
@@ -130,7 +145,8 @@ router.post("/", optionalAuth, validate({ body: orderBody }), async (req, res) =
       if (count === 0) throw conflict(`Sorry, "${p.name}" only has ${p.stock} left in stock`);
     }
 
-    const subtotal = items.reduce((sum, i) => sum + byId.get(i.productId).priceCents * i.quantity, 0);
+    const priced = priceLines(items, byId, await bundleLinks(tx, [...byId.keys()]));
+    const subtotal = priced.reduce((sum, l) => sum + l.lineCents, 0);
     return tx.order.create({
       data: {
         orderNumber: newOrderNumber(),
@@ -140,11 +156,11 @@ router.post("/", optionalAuth, validate({ body: orderBody }), async (req, res) =
         scheduledFor: body.shippingMethod === "SCHEDULED" ? body.scheduledFor : null,
         ...calculateTotals(subtotal, body.shippingMethod),
         ...body.address,
-        cardBrand: body.payment.cardBrand,
-        cardLast4: body.payment.cardLast4,
-        paymentStatus: "PAID",
+        cardBrand: body.payment?.cardBrand ?? null,
+        cardLast4: body.payment?.cardLast4 ?? null,
+        paymentStatus: body.payment ? "PAID" : "UNPAID",
         items: {
-          create: items.map((i) => {
+          create: priced.map((i) => {
             const p = byId.get(i.productId);
             return {
               productId: p.id,
@@ -154,6 +170,7 @@ router.post("/", optionalAuth, validate({ body: orderBody }), async (req, res) =
               unitCents: p.priceCents,
               unitCostCents: p.costCents,
               quantity: i.quantity,
+              discountCents: i.discountCents,
             };
           }),
         },

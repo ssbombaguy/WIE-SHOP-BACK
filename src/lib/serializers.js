@@ -30,6 +30,7 @@ export function productCard(p) {
     inStock: p.stock > 0,
     isFeatured: p.isFeatured,
     isBestseller: p.isBestseller,
+    condition: p.condition,
     image: p.images[0] ? { url: assetUrl(p.images[0].url), alt: p.images[0].alt } : null,
     category: p.category,
   };
@@ -39,11 +40,27 @@ export function productDetail(p) {
   return {
     ...productCard(p),
     description: p.description,
+    descriptionKa: p.descriptionKa,
     stock: p.stock,
     colors: p.colors,
     specs: p.specs,
     images: p.images.map(({ url, alt, sourceUrl }) => ({ url: assetUrl(url), alt, sourceUrl })),
     shipping: { days: p.supplier.shippingDays, from: p.supplier.country },
+  };
+}
+
+// Admin view of a product: everything, including cost price and supplier, plus how often it was ordered.
+export function adminProduct(p) {
+  const { _count, images, bundleItems, ...rest } = p;
+  return {
+    ...rest,
+    images: images.map(({ id, url, alt, publicId, sourceUrl }) => ({ id, url: assetUrl(url), alt, publicId, sourceUrl })),
+    bundle: (bundleItems ?? []).map(({ itemId, discountPercent, item }) => ({
+      itemId,
+      discountPercent,
+      item: { name: item.name, priceCents: item.priceCents, image: assetUrl(item.images[0]?.url) },
+    })),
+    orderCount: _count?.orderItems ?? 0,
   };
 }
 

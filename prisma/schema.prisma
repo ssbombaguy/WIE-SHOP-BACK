@@ -1,7 +1,7 @@
 // Prisma schema for the Cyber dropshipping store.
 // After changing this file run:  npm run db:migrate  (creates a migration + regenerates the client)
 //
-// Money is stored as integer cents (priceCents = 99900 means $999.00).
+// Money is stored as integer tetri, the lari's cents (priceCents = 389900 means 3 899.00 ₾).
 // Floats lose precision with money; integers never do. Stripe uses the same convention.
 
 generator client {
@@ -33,6 +33,13 @@ enum PaymentStatus {
   UNPAID
   PAID
   REFUNDED
+}
+
+// Phones especially are sold new, refurbished (restored by the supplier) or used (second hand).
+enum Condition {
+  NEW
+  REFURBISHED
+  USED
 }
 
 enum ShippingMethod {
@@ -79,6 +86,7 @@ model Product {
   slug           String         @unique
   brand          String
   description    String
+  descriptionKa  String? // Georgian description; the storefront falls back to `description`
   priceCents     Int // what the customer pays
   compareAtCents Int? // old price, shown crossed out when on sale
   costCents      Int // what we pay the supplier; never sent to the storefront
@@ -90,6 +98,10 @@ model Product {
   specs          Json // free-form per category: { "Screen size": "6.1\"", "Battery": "3279 mAh" }
   isFeatured     Boolean        @default(false)
   isBestseller   Boolean        @default(false)
+  condition      Condition      @default(NEW)
+  // Dropped from the catalog but still referenced by old orders, so it can't be deleted.
+  // Archived products are hidden from the shop and can't be bought or favorited.
+  archived       Boolean        @default(false)
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
   categoryId     String
@@ -99,10 +111,27 @@ model Product {
   images         ProductImage[]
   favorites      Favorite[]
   orderItems     OrderItem[]
+  bundleItems    BundleItem[]   @relation("BundleMain")
+  bundledIn      BundleItem[]   @relation("BundleAccessory")
 
   @@index([categoryId])
   @@index([brand])
   @@index([priceCents])
+  @@index([condition])
+}
+
+// "Cheaper together" (ერთად იაფია): an accessory offered with a product at a discount. The discount only
+// applies when both are in the same order, for as many accessory units as there are main products.
+model BundleItem {
+  productId       String // the main product, e.g. the phone
+  itemId          String // the accessory
+  discountPercent Int
+  position        Int     @default(0)
+  product         Product @relation("BundleMain", fields: [productId], references: [id], onDelete: Cascade)
+  item            Product @relation("BundleAccessory", fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@id([productId, itemId])
+  @@index([itemId])
 }
 
 model ProductImage {
@@ -174,6 +203,7 @@ model OrderItem {
   unitCents     Int
   unitCostCents Int
   quantity      Int
+  discountCents Int     @default(0) // bundle discount for the whole line
 
   @@index([orderId])
 }
